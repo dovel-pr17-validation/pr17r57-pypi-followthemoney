@@ -1,0 +1,368 @@
+import pytest
+from rigour.time import datetime_iso, utc_now
+
+from followthemoney.dataset import Dataset, UndefinedDataset
+from followthemoney.exc import InvalidData
+from followthemoney.proxy import EntityProxy
+from followthemoney.statement import Statement, StatementEntity
+from followthemoney.statement.util import BASE_ID
+from followthemoney.types import registry
+
+DAIMLER = "66ce9f62af8c7d329506da41cb7c36ba058b3d28"
+EXAMPLE = {
+    "id": "bla",
+    "schema": "Person",
+    "properties": {"name": ["John Doe"], "lastName": ["Doe"], "birthDate": ["1976"]},
+}
+
+EXAMPLE_2 = {
+    "id": "test",
+    "schema": "Person",
+    "properties": {
+        "name": ["Ralph Tester"],
+        "birthDate": ["1972-05-01"],
+        "idNumber": ["9177171", "8e839023"],
+        "website": ["https://ralphtester.me"],
+        "phone": ["+12025557612"],
+        "email": ["info@ralphtester.me"],
+        "topics": ["role.spy"],
+    },
+}
+
+
+def test_import_entity():
+    sp = StatementEntity.from_data(UndefinedDataset, EXAMPLE_2)
+    assert sp.schema is not None
+    assert sp.schema.name == "Person"
+    assert sp.id == "test"
+    assert len(list(sp.statements)) == 9
+
+
+def test_parse_proxy():
+    sp = EntityProxy.from_dict(EXAMPLE_2)
+    for stmt in Statement.from_entity(sp, dataset="test", origin="space"):
+        assert stmt.entity_id == "test"
+        assert stmt.schema == "Person"
+        assert stmt.dataset == "test"
+        assert stmt.origin == "space"
+        if stmt.prop == BASE_ID:
+            continue
+        assert stmt.prop in sp.schema.properties
+        assert stmt.value in sp.get(stmt.prop)
+
+    with pytest.raises(InvalidData):
+        EntityProxy.from_dict({"id": "test", "schema": "Banana"})
+
+
+def test_example_entity():
+    sp = StatementEntity.from_data(UndefinedDataset, EXAMPLE)
+    assert len(sp) == 4
+    idstmt = list(sp.statements)[-1]
+    assert idstmt.value == "8ad2048e5f9d7cae8ffe724d09f0a3a5ca18bfec"
+    assert sp.caption == "John Doe"
+    assert sp.checksum == "01b955d90ddb0999750531893bff991318d5c559"
+    assert sp.key_prefix == UndefinedDataset.name
+    assert "John Doe" in sp.get_type_values(registry.name)
+    assert len(list(sp.iterprops())) == 3
+    assert len(sp.properties) == 3
+    sp.add("country", "us")
+    assert len(sp) == 5
+    idstmt = list(sp.statements)[-1]
+    assert idstmt.value == "43598935c0292ca8bddc93590fd242ff74dee87e"
+    sp.add("country", {"gb"})
+    assert len(sp) == 6
+    sp.add("country", ("gb", "us"))
+    assert len(sp) == 6
+    sp.add("country", ["gb", "us"])
+    assert len(sp) == 6
+    sp.set("country", "gb")
+    assert len(sp) == 5
+    assert len(list(sp.iterprops())) == 4
+    data = sp.to_dict()
+    assert data["id"] == sp.id, data
+    idstmt = list(sp.statements)[-1]
+    so = sp.clone()
+    assert so.id == sp.id
+    assert sp.checksum == so.checksum
+    assert so.dataset == sp.dataset
+    idstmt2 = list(so.statements)[-1]
+    assert idstmt.value == idstmt2.value
+
+    sx = StatementEntity.from_statements(UndefinedDataset, sp.statements)
+    assert sx.id == sp.id
+    assert len(sx) == len(sp)
+
+    sp.add("notes", "Ich bin eine banane!", lang="deu")
+    claim = sp.get_statements("notes")[0]
+    assert claim.lang == "deu", claim
+
+    sp.add("banana", "Ich bin eine banane!", lang="deu", quiet=True)
+
+    assert len(sp.get_statements("notes")) == 1
+    sp.add("notes", None, lang="deu", quiet=True)
+    assert len(sp.get_statements("notes")) == 1
+
+    sp.add("alias", "Banana Boy")
+    assert len(sp.get_statements("alias")) == 1
+
+    with pytest.raises(InvalidData):
+        sp.get_statements("banana")
+    assert len(sp.get_statements("banana", quiet=True)) == 0
+
+    sp.add("nationality", "Germany")
+    claim = sp.get_statements("nationality")[0]
+    assert claim.value == "de", claim
+    assert claim.prop == "nationality", claim
+    assert claim.prop_type == "country", claim
+    assert claim.original_value == "Germany", claim
+
+    sp.add("classification", "Banana", origin="fruit_knowledge")
+    claim = sp.get_statements("classification")[0]
+    assert claim.value == "Banana", claim
+    assert claim.prop == "classification", claim
+    assert claim.origin == "fruit_knowledge", claim
+
+    for prop, val in sp.itervalues():
+        if prop.name == "nationality":
+            assert val == "de"
+
+    pre_len = len(sp)
+    sp.add("nationality", "de")
+    sp.add("nationality", "it")
+    sp.add("nationality", "fr")
+    assert pre_len + 2 == len(sp), sp._statements["country"]
+    assert len(sp.get_type_values(registry.country)) == 4
+
+    sp.remove("nationality", "it")
+    assert len(sp.get("nationality")) == 2
+    sp.pop("nationality")
+    assert len(sp.get("nationality")) == 0
+
+    assert len(sp.pop("banana", quiet=True)) == 0
+
+    stmts = list(sp.statements)
+    assert len(stmts) == len(sp), stmts
+    assert min(stmts).prop == Statement.BASE
+
+
+def test_advanced_props():
+    sp = StatementEntity.from_data(UndefinedDataset, EXAMPLE_2)
+    assert sp.last_seen is None
+    now = datetime_iso(utc_now())
+    assert now is not None
+    for stmt in sp.statements:
+        stmt.last_seen = now
+    assert sp.last_seen == now
+
+    assert len(sp.referents) == 0
+    sp.extra_referents.add("banana")
+    assert len(sp.referents) == 1
+
+    assert sp.caption == "Ralph Tester"
+    assert sp.pop("name") == ["Ralph Tester"]
+    assert sp.caption == "info@ralphtester.me"
+    sp.pop("email")
+    sp.pop("phone")
+    assert sp.caption == sp.schema.name
+    sp.add("name", "Ralph Tester")
+    assert sp.caption == "Ralph Tester"
+
+
+def test_entity_merge():
+    sp1 = StatementEntity.from_data(UndefinedDataset, EXAMPLE_2)
+    sp2 = StatementEntity.from_data(UndefinedDataset, EXAMPLE_2)
+    assert sp1.id == sp2.id
+    assert sp1.schema.name == sp2.schema.name
+    assert len(sp1) == len(sp2)
+
+    sp1.add("alias", "Ralph")
+    assert len(sp1.get_statements("alias")) == 1
+    assert len(sp2.get_statements("alias")) == 0
+
+    sp1.merge(sp2)
+    assert len(sp1.get_statements("alias")) == 1
+
+
+def test_other_entity():
+    smt = Statement(
+        entity_id="blubb",
+        prop="name",
+        schema="LegalEntity",
+        value="Jane Doe",
+        dataset="test",
+    )
+    sp = StatementEntity.from_statements(UndefinedDataset, [smt])
+    assert sp.id == "blubb"
+    assert sp.schema.name == "LegalEntity"
+    assert "test" in sp.datasets
+    assert sp.first_seen is None
+
+    dt = utc_now().isoformat()
+    smt2 = Statement(
+        entity_id="gnaa",
+        prop="birthDate",
+        schema="Person",
+        value="1979",
+        dataset="source",
+        first_seen=dt,
+    )
+    sp.add_statement(smt2)
+    assert sp.id == "blubb"
+    assert sp.schema.name == "Person"
+    assert sp.first_seen == dt
+
+    with pytest.raises(InvalidData):
+        smt2 = Statement(
+            entity_id="gnaa",
+            prop="incorporationDate",
+            schema="Company",
+            value="1979",
+            dataset="source",
+        )
+        sp.add_statement(smt2)
+
+    with pytest.raises(InvalidData):
+        sp.add("identification", "abc")
+    sp.add("identification", "abc", quiet=True)
+
+    sp.add("alias", "Harry", lang="deu")
+    aliases = sp.get_statements("alias")
+    assert aliases[0].lang == "deu", aliases
+
+
+def test_statement_dict():
+    dx = Dataset.make({"name": "test", "title": "Test"})
+    sp = StatementEntity.from_data(dx, EXAMPLE_2)
+
+    data = sp.to_statement_dict()
+    assert data["id"] == "test"
+    assert data["schema"] == "Person"
+    assert "properties" not in data
+    stmts = data["statements"]
+    assert len(stmts) == len(list(sp._iter_stmt()))
+
+    sp2 = StatementEntity.from_data(dx, data)
+    assert sp2.id == sp.id
+    assert sp2.schema.name == sp.schema.name
+    assert sp2.get("name") == sp.get("name")
+    assert sp2.get("birthDate") == sp.get("birthDate")
+
+
+def test_entity_origin():
+    dx = Dataset.make({"name": "test", "title": "Test"})
+    sp = StatementEntity.from_data(dx, EXAMPLE)
+    data = sp.to_dict()
+    assert "origin" not in data
+    stmt = next(sp.statements)
+    stmt.origin = "space"
+    sp.add_statement(stmt)
+    data = sp.to_dict()
+    assert data["origin"] == ["space"]
+
+
+def test_entity_external():
+    dx = Dataset.make({"name": "test", "title": "Test"})
+    empty = StatementEntity(dx, {"id": "bla", "schema": "Person"})
+    assert empty.external is False
+
+    sp = StatementEntity.from_data(dx, EXAMPLE)
+    assert sp.external is False
+
+    ext = StatementEntity(dx, {"id": "bla", "schema": "Person"})
+    ext.add("name", "John Doe", external=True)
+    ext.add("birthDate", "1976", external=True)
+    assert ext.external is True
+
+    stmts = ext.get_statements("name")
+    assert len(stmts) == 1
+    assert stmts[0].external is True
+    assert stmts[0].id != sp.get_statements("name")[0].id
+
+    # A single internal statement makes the whole entity internal again:
+    ext.add("lastName", "Doe")
+    assert ext.external is False
+    ext.pop("lastName")
+    assert ext.external is True
+
+    # The same value added both ways yields two distinct statements:
+    ext.add("name", "John Doe")
+    assert ext.external is False
+    assert len(ext.get_statements("name")) == 2
+    assert ext.get("name") == ["John Doe"]
+
+    # set() replaces the property and applies the flag:
+    ext.set("name", "John Doe", external=True)
+    assert ext.external is True
+    assert len(ext.get_statements("name")) == 1
+
+
+def test_entity_external_roundtrip():
+    dx = Dataset.make({"name": "test", "title": "Test"})
+    ext = StatementEntity(dx, {"id": "bla", "schema": "Person"})
+    ext.add("name", "John Doe", external=True)
+    ext.add("birthDate", "1976", external=True)
+
+    other = StatementEntity.from_data(dx, ext.to_statement_dict())
+    assert other.external is True
+
+    statements = list(ext._iter_stmt())
+    assert StatementEntity.from_statements(dx, statements).external is True
+
+    mixed = statements + [
+        Statement(
+            entity_id="bla",
+            prop="lastName",
+            schema="Person",
+            value="Doe",
+            dataset=dx.name,
+        )
+    ]
+    assert StatementEntity.from_statements(dx, mixed).external is False
+
+
+def test_entity_original_value():
+    def ovs(entity: StatementEntity, prop: str) -> dict[str, str | None]:
+        return {
+            s.value: s.original_value for s in entity._iter_stmt() if s.prop == prop
+        }
+
+    # Normalisation changed the value: keep what the source said.
+    sp = StatementEntity(UndefinedDataset, {"id": "x", "schema": "Person"})
+    sp.add("nationality", "Russia")
+    assert ovs(sp, "nationality") == {"ru": "Russia"}
+
+    # Nothing was normalised: nothing to record.
+    sp = StatementEntity(UndefinedDataset, {"id": "x", "schema": "Person"})
+    sp.add("nationality", "ru")
+    assert ovs(sp, "nationality") == {"ru": None}
+
+    sp = StatementEntity(UndefinedDataset, {"id": "x", "schema": "Person"})
+    sp.add("name", "Jane Doe")
+    assert ovs(sp, "name") == {"Jane Doe": None}
+
+    # add() sanitises whitespace before building the statement, so by the time
+    # a value is compared there is no transformation left to record.
+    sp = StatementEntity(UndefinedDataset, {"id": "x", "schema": "Person"})
+    sp.add("name", "  Jane Doe  ")
+    assert ovs(sp, "name") == {"Jane Doe": None}
+
+    # unsafe_add does not sanitise, so the cleaning is visible there.
+    sp = StatementEntity(UndefinedDataset, {"id": "x", "schema": "Person"})
+    prop = sp.schema.properties["name"]
+    sp.unsafe_add(prop, "  Jane Doe  ")
+    assert ovs(sp, "name") == {"Jane Doe": "  Jane Doe  "}
+
+    # An explicit original_value wins over the derived one...
+    sp = StatementEntity(UndefinedDataset, {"id": "x", "schema": "Person"})
+    sp.add("nationality", "Russia", original_value="Rossiya")
+    assert ovs(sp, "nationality") == {"ru": "Rossiya"}
+
+    # ...unless it just repeats the value, in which case it records nothing.
+    sp = StatementEntity(UndefinedDataset, {"id": "x", "schema": "Person"})
+    sp.add("nationality", "Russia", original_value="ru")
+    assert ovs(sp, "nationality") == {"ru": None}
+
+    # An empty original_value is the same as passing none at all: derive it.
+    sp = StatementEntity(UndefinedDataset, {"id": "x", "schema": "Person"})
+    sp.add("nationality", "Russia", original_value="")
+    assert ovs(sp, "nationality") == {"ru": "Russia"}

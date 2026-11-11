@@ -1,0 +1,45 @@
+from urllib.parse import quote
+
+from followthemoney.types import registry
+
+urls = registry.url
+
+
+def test_base():
+    assert urls.node_id("http://foo.org") == "url:http://foo.org"
+
+
+def test_is_url():
+    assert urls.validate("http://foo.org")
+    # assert not urls.validate(None)
+    assert not urls.validate("hello")
+    assert urls.validate("foo.org")
+    assert urls.validate("//foo.org")
+
+
+def test_unicode_url():
+    utext = "http://ko.wikipedia.org/wiki/위키백과:대문"
+    assert urls.validate(utext)
+    etext = quote(utext, safe=":/")
+    assert urls.validate(etext)
+
+
+def test_junk_url():
+    # https://github.com/opensanctions/followthemoney/issues/339 - source data
+    # puts labels and prose into website columns, which used to be emitted as
+    # URLs with the prose as their host name.
+    assert urls.clean("Social media: http://vk.com/sobolipress") is None
+    assert urls.clean("Official web site: http://soboli.net") is None
+    assert not urls.validate("Nr. 12.5")
+
+
+def test_parse_url():
+    assert urls.clean("http://foo.com/") == "http://foo.com/"
+    assert urls.clean("http://foo.com/#lala") == "http://foo.com/#lala"
+    assert urls.clean("http://foo.com?b=1&a=2") == "http://foo.com/?b=1&a=2"
+    assert urls.clean("http://FOO.com") == "http://FOO.com/"
+    assert urls.clean("http://FOO.com/A") == "http://FOO.com/A"
+
+
+def test_specificity():
+    assert urls.specificity("http://foo.com/#banana") > 0.1
